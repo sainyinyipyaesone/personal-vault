@@ -1,0 +1,18 @@
+[package]
+name = "personal-vault"
+version = "0.1.0"
+description = "A private, locally encrypted personal credential vault"
+authors = ["Personal Vault"]
+edition = "2021"
+
+[lib]
+name = "personal_vault_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+keyring = "4.2"
+serde_json = "1"
+tauri = { version = "2", features = [] }
