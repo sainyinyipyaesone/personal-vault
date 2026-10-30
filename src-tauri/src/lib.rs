@@ -94,6 +94,37 @@ fn read_unlock_factors(vault_id: String) -> Result<Option<serde_json::Value>, St
     Ok(Some(factors))
 }
 
+#[tauri::command]
+fn update_totp_secret(vault_id: String, totp_secret: String) -> Result<(), String> {
+    if totp_secret.len() != 32
+        || !totp_secret
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || (b'2'..=b'7').contains(&byte))
+    {
+        return Err("The authenticator secret is invalid.".to_string());
+    }
+    let Some(mut factors) = read_unlock_factors(vault_id.clone())? else {
+        return Err(
+            "The saved unlock factors could not be found; the authenticator was not changed."
+                .to_string(),
+        );
+    };
+    let Some(factors) = factors.as_object_mut() else {
+        return Err("The saved unlock factors are invalid.".to_string());
+    };
+    factors.insert(
+        "totpSecret".to_string(),
+        serde_json::Value::String(totp_secret),
+    );
+    let serialized = serde_json::to_string(&factors)
+        .map_err(|error| format!("Could not update the saved authenticator: {error}"))?;
+    let entry = Entry::new(KEYRING_SERVICE, &vault_id)
+        .map_err(|error| format!("Could not access the OS credential store: {error}"))?;
+    entry.set_password(&serialized).map_err(|error| {
+        format!("Could not save the new authenticator in the OS credential store: {error}")
+    })
+}
+
 fn vault_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let directory = app
         .path()
@@ -187,7 +218,8 @@ pub fn run() {
             read_vault,
             write_vault,
             store_unlock_factors,
-            read_unlock_factors
+            read_unlock_factors,
+            update_totp_secret
         ])
         .run(tauri::generate_context!())
         .expect("error while running Personal Vault");

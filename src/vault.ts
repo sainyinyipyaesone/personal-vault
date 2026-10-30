@@ -250,12 +250,16 @@ export function createUnlockFactors(): UnlockFactors {
   return {
     vaultId: crypto.randomUUID(),
     deviceKey: toBase64(crypto.getRandomValues(new Uint8Array(32))),
-    totpSecret: encodeBase32(crypto.getRandomValues(new Uint8Array(20))),
+    totpSecret: createTotpSecret(),
   };
 }
 
-export function totpUri(secret: string): string {
-  const label = encodeURIComponent("Personal Vault");
+export function createTotpSecret(): string {
+  return encodeBase32(crypto.getRandomValues(new Uint8Array(20)));
+}
+
+export function totpUri(secret: string, accountName = "Personal Vault"): string {
+  const label = encodeURIComponent(accountName);
   const issuer = encodeURIComponent("Personal Vault");
   return `otpauth://totp/${label}?secret=${secret}&issuer=${issuer}&algorithm=SHA1&digits=6&period=30`;
 }

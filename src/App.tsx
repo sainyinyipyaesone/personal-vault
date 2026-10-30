@@ -39,7 +39,6 @@ import { QRCodeSVG } from "qrcode.react";
 import {
   type ChangeEvent,
   type FormEvent,
-  type KeyboardEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -57,6 +56,7 @@ import {
 } from "./types";
 import {
   createUnlockFactors,
+  createTotpSecret,
   createVault,
   parseEncryptedVault,
   sealVault,
@@ -69,6 +69,65 @@ import {
 } from "./vault";
 
 const AUTO_LOCK_AFTER = 5 * 60 * 1000;
+
+function useDialogFocus(onClose: () => void, busy: boolean) {
+  const dialogRef = useRef<HTMLElement>(null);
+  const previousFocus = useRef(document.activeElement instanceof HTMLElement ? document.activeElement : null);
+  const closeRef = useRef(onClose);
+  const busyRef = useRef(busy);
+  closeRef.current = onClose;
+  busyRef.current = busy;
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    const focusable = () => Array.from(dialog.querySelectorAll<HTMLElement>(
+      'button:not(:disabled), input:not(:disabled):not([type="hidden"]), select:not(:disabled), textarea:not(:disabled), a[href], summary, [tabindex]:not([tabindex="-1"])',
+    )).filter((element) => element.getClientRects().length > 0);
+    const focusInside = () => (focusable().find((element) => element.matches("input")) ?? focusable()[0] ?? dialog).focus();
+    if (!dialog.contains(document.activeElement)) focusInside();
+
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!busyRef.current) closeRef.current();
+      } else if (event.key === "Tab") {
+        const elements = focusable();
+        const first = elements[0];
+        const last = elements[elements.length - 1];
+        if (!first || !last) {
+          event.preventDefault();
+          dialog.focus();
+        } else if (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && (document.activeElement === last || !dialog.contains(document.activeElement))) {
+          event.preventDefault();
+          first.focus();
+        }
+      }
+    };
+    const onFocusIn = (event: FocusEvent) => {
+      if (event.target instanceof Node && !dialog.contains(event.target)) focusInside();
+    };
+    document.addEventListener("keydown", onKeyDown, true);
+    document.addEventListener("focusin", onFocusIn);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown, true);
+      document.removeEventListener("focusin", onFocusIn);
+      const previous = previousFocus.current;
+      if (previous?.isConnected && previous.getClientRects().length && getComputedStyle(previous).visibility !== "hidden") {
+        previous.focus();
+      } else {
+        const menuButton = document.querySelector<HTMLElement>(".mobile-menu-open");
+        if (menuButton?.getClientRects().length) menuButton.focus();
+      }
+    };
+  }, []);
+
+  return dialogRef;
+}
 
 const categoryIcons: Record<Category, typeof KeyRound> = {
   login: KeyRound,
@@ -131,6 +190,8 @@ function App() {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [totpCode, setTotpCode] = useState("");
   const [setupDraft, setSetupDraft] = useState<VaultSetupDraft | null>(null);
+  const [authenticatorSecret, setAuthenticatorSecret] = useState<string | null>(null);
+  const [authenticatorError, setAuthenticatorError] = useState("");
   const [busy, setBusy] = useState(false);
   const [authError, setAuthError] = useState("");
   const [query, setQuery] = useState("");
@@ -142,6 +203,8 @@ function App() {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [showSecret, setShowSecret] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
+  const menuCloseRef = useRef<HTMLButtonElement>(null);
   const importRef = useRef<HTMLInputElement>(null);
   const lastActivityRef = useRef(Date.now());
   const toastTimerRef = useRef<number | null>(null);
@@ -184,6 +247,8 @@ function App() {
     setShowSecret(false);
     setMasterPassword("");
     setConfirmPassword("");
+    setAuthenticatorSecret(null);
+    setAuthenticatorError("");
     setQuery("");
     setIsMenuOpen(false);
     setToast("");
@@ -217,27 +282,34 @@ function App() {
   }, [toast]);
 
   useEffect(() => {
+    if (isMenuOpen && window.matchMedia("(max-width: 850px)").matches) menuCloseRef.current?.focus();
+  }, [isMenuOpen]);
+
+  useEffect(() => {
     const onShortcut = (event: globalThis.KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+      const shortcut = event.metaKey || event.ctrlKey;
+      const modalOpen = editingItem !== undefined || authenticatorSecret !== null;
+      if (shortcut && event.key.toLowerCase() === "k") {
         event.preventDefault();
-        searchRef.current?.focus();
+        if (!modalOpen) searchRef.current?.focus();
       }
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "n" && isUnlocked && !busy) {
+      if (shortcut && event.key.toLowerCase() === "n" && isUnlocked) {
         event.preventDefault();
-        setEditingItem(null);
+        if (!busy && !modalOpen) setEditingItem(null);
       }
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "l" && isUnlocked) {
+      if (shortcut && event.key.toLowerCase() === "l" && isUnlocked) {
         event.preventDefault();
         lockVault();
       }
       if (event.key === "Escape") {
         setEditingItem(undefined);
         setIsMenuOpen(false);
+        if (isMenuOpen && window.matchMedia("(max-width: 850px)").matches) menuButtonRef.current?.focus();
       }
     };
     window.addEventListener("keydown", onShortcut);
     return () => window.removeEventListener("keydown", onShortcut);
-  }, [isUnlocked, lockVault, busy]);
+  }, [isUnlocked, lockVault, busy, editingItem, authenticatorSecret, isMenuOpen]);
 
   const selectedItem = useMemo(
     () => items.find((item) => item.id === selectedId) ?? null,
@@ -289,6 +361,16 @@ function App() {
   const showToast = (message: string) => {
     if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
     setToast(message);
+  };
+
+  const closeMenu = () => {
+    setIsMenuOpen(false);
+    if (window.matchMedia("(max-width: 850px)").matches) menuButtonRef.current?.focus();
+  };
+
+  const selectCategory = (category: Category | "all" | "favorites") => {
+    setCategoryFilter(category);
+    closeMenu();
   };
 
   const persist = async (activeSession: VaultSession, nextItems: VaultItem[]) => {
@@ -346,6 +428,44 @@ function App() {
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : String(error));
       throw error;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const beginAuthenticatorChange = () => {
+    if (session?.version !== 2) {
+      showToast("Unlock a supported vault before changing its authenticator.");
+      return;
+    }
+    setAuthenticatorSecret(createTotpSecret());
+    setAuthenticatorError("");
+    setIsMenuOpen(false);
+  };
+
+  const handleReplaceAuthenticator = async (code: string) => {
+    const activeSession = sessionRef.current;
+    const newSecret = authenticatorSecret;
+    setBusy(true);
+    setAuthenticatorError("");
+    try {
+      if (!activeSession || activeSession.version !== 2 || !newSecret) {
+        throw new Error("Unlock the vault again before changing its authenticator.");
+      }
+      if (!(await verifyTotp(newSecret, code))) {
+        throw new Error("That code did not match. Check the new authenticator entry and try its current code.");
+      }
+      if (sessionRef.current !== activeSession) {
+        throw new Error("The vault was locked before the authenticator could be changed.");
+      }
+      await invoke("update_totp_secret", {
+        vaultId: activeSession.vaultId,
+        totpSecret: newSecret,
+      });
+      setAuthenticatorSecret(null);
+      showToast("Authenticator changed. Use the new authenticator next time you unlock.");
+    } catch (error) {
+      setAuthenticatorError(error instanceof Error ? error.message : String(error));
     } finally {
       setBusy(false);
     }
@@ -611,7 +731,7 @@ function App() {
                     required
                   />
                   <PasswordGuidance />
-                  {(authError || storageError) && <p className="form-error">{authError || storageError}</p>}
+                  {(authError || storageError) && <p className="form-error" role="alert">{authError || storageError}</p>}
                   <button className="primary-button auth-submit" type="submit" disabled={busy || Boolean(storageError)}>
                     Continue to security setup <ArrowRight size={16} />
                   </button>
@@ -654,7 +774,7 @@ function App() {
                   ) : encryptedEnvelope?.version === 1 ? (
                     <p className="auth-factor-hint">This older vault will be upgraded to three-factor protection after unlock.</p>
                   ) : null}
-                  {(authError || storageError) && <p className="form-error">{authError || storageError}</p>}
+                  {(authError || storageError) && <p className="form-error" role="alert">{authError || storageError}</p>}
                   <button className="primary-button auth-submit" type="submit" disabled={busy || Boolean(storageError)}>
                     {busy ? "Verifying factors…" : "Unlock vault"} <ArrowRight size={16} />
                   </button>
@@ -678,11 +798,11 @@ function App() {
 
   return (
     <main className="app-shell">
-      <aside className={`sidebar ${isMenuOpen ? "sidebar-open" : ""}`}>
+      <aside id="vault-sidebar" className={`sidebar ${isMenuOpen ? "sidebar-open" : ""}`} aria-label="Vault navigation">
         <div className="sidebar-brand">
           <div className="brand-mark"><ShieldCheck size={21} strokeWidth={2.2} /></div>
           <div><strong>personal<span>vault</span></strong><small>YOUR PRIVATE SPACE</small></div>
-          <button className="icon-button mobile-menu-close" aria-label="Close menu" onClick={() => setIsMenuOpen(false)}><X size={17} /></button>
+          <button ref={menuCloseRef} className="icon-button mobile-menu-close" aria-label="Close menu" onClick={closeMenu}><X size={17} /></button>
         </div>
 
         <button className="add-item-button" disabled={busy} onClick={() => setEditingItem(null)}>
@@ -691,10 +811,10 @@ function App() {
 
         <div className="sidebar-section">
           <p className="sidebar-label">YOUR VAULT</p>
-          <button className={`nav-item ${categoryFilter === "all" ? "active" : ""}`} onClick={() => setCategoryFilter("all")}>
+          <button className={`nav-item ${categoryFilter === "all" ? "active" : ""}`} aria-pressed={categoryFilter === "all"} onClick={() => selectCategory("all")}>
             <span className="nav-icon"><LockKeyhole size={16} /></span><span>All items</span><span className="nav-count">{items.length}</span>
           </button>
-          <button className={`nav-item ${categoryFilter === "favorites" ? "active" : ""}`} onClick={() => setCategoryFilter("favorites")}>
+          <button className={`nav-item ${categoryFilter === "favorites" ? "active" : ""}`} aria-pressed={categoryFilter === "favorites"} onClick={() => selectCategory("favorites")}>
             <span className="nav-icon"><Star size={16} /></span><span>Favorites</span><span className="nav-count">{items.filter((item) => item.favorite).length}</span>
           </button>
         </div>
@@ -707,7 +827,8 @@ function App() {
               <button
                 key={category}
                 className={`nav-item ${categoryFilter === category ? "active" : ""}`}
-                onClick={() => setCategoryFilter(category)}
+                aria-pressed={categoryFilter === category}
+                onClick={() => selectCategory(category)}
               >
                 <span className={`nav-icon category-icon-${category}`}><Icon size={15} /></span>
                 <span>{categoryLabels[category]}</span>
@@ -724,6 +845,11 @@ function App() {
             <div className="safe-card-divider" />
             <div className="safe-card-foot"><span><Clock3 size={13} /> Auto-lock in 5 min</span><span>3 FACTORS</span></div>
           </div>
+          {session?.version === 2 && (
+            <button className="nav-item authenticator-nav" disabled={busy} onClick={beginAuthenticatorChange}>
+              <span className="nav-icon"><ShieldCheck size={16} /></span><span>Change authenticator</span>
+            </button>
+          )}
           <button className="nav-item lock-nav" onClick={lockVault}>
             <span className="nav-icon"><LogOut size={16} /></span><span>Lock vault</span><kbd>⌘ L</kbd>
           </button>
@@ -732,15 +858,15 @@ function App() {
 
       <section className="workspace">
         <header className="topbar">
-          <button className="icon-button mobile-menu-open" aria-label="Open menu" onClick={() => setIsMenuOpen(true)}><Menu size={19} /></button>
+          <button ref={menuButtonRef} className="icon-button mobile-menu-open" aria-label="Open menu" aria-controls="vault-sidebar" aria-expanded={isMenuOpen} onClick={() => setIsMenuOpen(true)}><Menu size={19} /></button>
           <div className="breadcrumb"><span>My vault</span><ChevronDown size={14} /><strong>{heading}</strong></div>
           <div className="topbar-actions">
             <label className="search-box">
               <Search size={16} />
-              <input ref={searchRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search your vault…" />
+              <input ref={searchRef} aria-label="Search your vault" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search your vault…" />
               <kbd>⌘ K</kbd>
             </label>
-            <button className="icon-button help-button" aria-label="Security information" title="Encrypted locally on this device"><CircleHelp size={17} /></button>
+            <span className="icon-button help-button" aria-label="Encrypted locally on this device" title="Encrypted locally on this device"><CircleHelp size={17} /></span>
             <div className="topbar-divider" />
             <div className="avatar">PV</div>
           </div>
@@ -751,7 +877,7 @@ function App() {
             <div>
               <div className="page-eyebrow"><span className="green-dot" /> YOUR SECURE COLLECTION</div>
               <h1>{heading}</h1>
-              <p>{selectedCount} {selectedCount === 1 ? "item" : "items"} stored privately on this device</p>
+              <p aria-live="polite" aria-atomic="true">{selectedCount} {selectedCount === 1 ? "item" : "items"} stored privately on this device</p>
             </div>
             <button className="primary-button page-add-button" disabled={busy} onClick={() => setEditingItem(null)}><Plus size={17} /> Add new item</button>
           </div>
@@ -812,12 +938,12 @@ function App() {
         </div>
 
         <footer className="statusbar">
-          <div><span className="status-green" /><span>{busy ? "Saving securely…" : "All changes saved"}</span><span className="status-separator">·</span><span>Encrypted locally</span></div>
+          <div><span className="status-green" /><span>{busy ? (authenticatorSecret ? "Updating authenticator…" : "Saving securely…") : "All changes saved"}</span><span className="status-separator">·</span><span>Encrypted locally</span></div>
           <div><ShieldCheck size={14} /><span>Private & secure</span><button className="status-export" onClick={exportBackup} disabled={busy}><ArrowDownToLine size={13} /> Export backup</button></div>
         </footer>
       </section>
 
-      {isMenuOpen && <button className="sidebar-scrim" aria-label="Close menu" onClick={() => setIsMenuOpen(false)} />}
+      {isMenuOpen && <button className="sidebar-scrim" aria-label="Close menu" onClick={closeMenu} />}
       {editingItem !== undefined && (
         <ItemEditor
           item={editingItem}
@@ -827,7 +953,21 @@ function App() {
           onToast={showToast}
         />
       )}
-      {toast && <div className="toast"><span className="toast-check"><Check size={13} /></span>{toast}</div>}
+      {authenticatorSecret && (
+        <AuthenticatorReplacement
+          secret={authenticatorSecret}
+          busy={busy}
+          error={authenticatorError}
+          onCancel={() => {
+            setAuthenticatorSecret(null);
+            setAuthenticatorError("");
+          }}
+          onComplete={handleReplaceAuthenticator}
+        />
+      )}
+      <div className={toast ? "toast" : "visually-hidden"} role="status" aria-atomic="true">
+        {toast && <><span className="toast-check"><Check size={13} /></span>{toast}</>}
+      </div>
     </main>
   );
 }
@@ -911,7 +1051,7 @@ function FactorEnrollment({
           required
           autoFocus
         />
-        {(localError || error) && <p className="form-error">{localError || error}</p>}
+        {(localError || error) && <p className="form-error" role="alert">{localError || error}</p>}
         <button className="primary-button auth-submit" type="submit" disabled={busy || code.replace(/\s/g, "").length !== 6}>
           {busy ? "Securing your vault…" : "Finish setup"} <ArrowRight size={16} />
         </button>
@@ -923,11 +1063,87 @@ function FactorEnrollment({
   );
 }
 
+function AuthenticatorReplacement({
+  secret,
+  busy,
+  error,
+  onComplete,
+  onCancel,
+}: {
+  secret: string;
+  busy: boolean;
+  error: string;
+  onComplete: (code: string) => Promise<void>;
+  onCancel: () => void;
+}) {
+  const [code, setCode] = useState("");
+  const dialogRef = useDialogFocus(onCancel, busy);
+
+  return (
+    <div className="modal-backdrop">
+      <section ref={dialogRef} tabIndex={-1} className="editor-modal authenticator-modal" role="dialog" aria-modal="true" aria-labelledby="authenticator-title">
+        <header className="editor-header">
+          <div className="editor-header-icon"><ShieldCheck size={18} /></div>
+          <div>
+            <p className="eyebrow">VAULT SECURITY</p>
+            <h2 id="authenticator-title">Change authenticator</h2>
+          </div>
+          <button className="icon-button editor-close" aria-label="Cancel authenticator change" disabled={busy} onClick={onCancel}>
+            <X size={18} />
+          </button>
+        </header>
+        <form
+          className="authenticator-replacement-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void onComplete(code);
+          }}
+        >
+          <div className="authenticator-replacement-content">
+            <p className="auth-subtitle">
+              Scan this new code, then confirm with its current 6-digit code. Your current authenticator stays active until confirmation succeeds.
+            </p>
+            <div className="auth-qr">
+              <QRCodeSVG value={totpUri(secret, "Personal Vault - New")} size={148} level="M" />
+            </div>
+            <details className="auth-manual-secret">
+              <summary>Can't scan? Enter the setup key manually</summary>
+              <code>{secret}</code>
+            </details>
+            <p className="authenticator-warning">Keep the setup key private. After confirmation, the old authenticator will no longer work.</p>
+            <label htmlFor="replacement-totp-code">New authenticator code</label>
+            <input
+              id="replacement-totp-code"
+              type="text"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              pattern="[0-9 ]{6,8}"
+              maxLength={8}
+              value={code}
+              onChange={(event) => setCode(event.target.value.replace(/[^0-9 ]/g, ""))}
+              placeholder="6-digit code"
+              required
+              autoFocus
+            />
+            {error && <p className="form-error" role="alert">{error}</p>}
+          </div>
+          <footer className="editor-footer">
+            <button className="cancel-button" type="button" disabled={busy} onClick={onCancel}>Cancel</button>
+            <button className="primary-button save-button" type="submit" disabled={busy || code.replace(/\s/g, "").length !== 6}>
+              {busy ? "Verifying…" : "Confirm and change"}
+            </button>
+          </footer>
+        </form>
+      </section>
+    </div>
+  );
+}
+
 function VaultItemCard({ item, selected, onClick }: { item: VaultItem; selected: boolean; onClick: () => void }) {
   const Icon = categoryIcons[item.category];
   const subtitle = item.username || item.url || item.notes || secretLabels[item.category];
   return (
-    <button className={`item-card ${selected ? "item-card-selected" : ""}`} onClick={onClick}>
+    <button className={`item-card ${selected ? "item-card-selected" : ""}`} aria-pressed={selected} onClick={onClick}>
       <span className={`item-icon item-icon-${item.category}`}><Icon size={18} strokeWidth={1.8} /></span>
       <span className="item-card-text">
         <span className="item-card-title">{item.title}</span>
@@ -964,6 +1180,7 @@ function ItemDetails({
   onToast: (message: string) => void;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
   const Icon = categoryIcons[item.category];
   const typeLabel = categoryLabels[item.category];
 
@@ -974,8 +1191,14 @@ function ItemDetails({
         <button className={`icon-button detail-favorite ${item.favorite ? "is-favorite" : ""}`} disabled={busy} aria-label={item.favorite ? "Remove from favorites" : "Add to favorites"} onClick={onFavorite}>
           <Star size={17} fill={item.favorite ? "currentColor" : "none"} />
         </button>
-        <div className="detail-menu-wrap">
-          <button className="icon-button" disabled={busy} aria-label="More item actions" onClick={() => setMenuOpen((open) => !open)}><MoreHorizontal size={19} /></button>
+        <div className="detail-menu-wrap" onKeyDown={(event) => {
+          if (event.key === "Escape" && menuOpen) {
+            event.stopPropagation();
+            setMenuOpen(false);
+            menuButtonRef.current?.focus();
+          }
+        }}>
+          <button ref={menuButtonRef} className="icon-button" disabled={busy} aria-label="More item actions" aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}><MoreHorizontal size={19} /></button>
           {menuOpen && (
             <div className="context-menu">
               <button disabled={busy} onClick={() => { onEdit(); setMenuOpen(false); }}><Settings2 size={14} /> Edit item</button>
@@ -1118,6 +1341,7 @@ function ItemEditor({
   );
   const [showSecret, setShowSecret] = useState(false);
   const titleRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useDialogFocus(onClose, busy);
   const setField = <K extends keyof ItemDraft>(key: K, value: ItemDraft[K]) =>
     setDraft((current) => ({ ...current, [key]: value }));
 
@@ -1141,17 +1365,13 @@ function ItemEditor({
     onSave(draft);
   };
 
-  const handleEditorKey = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key === "Escape") onClose();
-  };
-
   return (
-    <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }} onKeyDown={handleEditorKey}>
-      <section className="editor-modal" role="dialog" aria-modal="true" aria-labelledby="editor-title">
+    <div className="modal-backdrop" onMouseDown={(event) => { if (!busy && event.target === event.currentTarget) onClose(); }}>
+      <section ref={dialogRef} tabIndex={-1} className="editor-modal" role="dialog" aria-modal="true" aria-labelledby="editor-title">
         <div className="editor-header">
           <div className="editor-header-icon"><Plus size={18} /></div>
           <div><p className="eyebrow">{item ? "UPDATE YOUR ENTRY" : "ADD TO YOUR VAULT"}</p><h2 id="editor-title">{item ? "Edit item" : "New item"}</h2></div>
-          <button className="icon-button editor-close" aria-label="Close editor" onClick={onClose}><X size={18} /></button>
+          <button className="icon-button editor-close" aria-label="Close editor" disabled={busy} onClick={onClose}><X size={18} /></button>
         </div>
         <form className="editor-form" onSubmit={handleSubmit}>
           <div className="editor-scroll">
@@ -1211,7 +1431,7 @@ function ItemEditor({
             <div className="editor-encryption-note"><ShieldCheck size={15} /><span>Your details are encrypted before they are saved to this device.</span></div>
           </div>
           <div className="editor-footer">
-            <button type="button" className="cancel-button" onClick={onClose}>Cancel</button>
+            <button type="button" className="cancel-button" disabled={busy} onClick={onClose}>Cancel</button>
             <button type="submit" className="primary-button save-button" disabled={busy}>{busy ? "Saving…" : item ? "Save changes" : "Save item"} <Check size={15} /></button>
           </div>
         </form>

@@ -7,8 +7,10 @@ Personal Vault is a local-first desktop app for keeping credentials and other pr
 - Store logins, payment cards, identity details, secure notes, API keys, SSH keys, Wi-Fi credentials, and custom entries.
 - Add notes, tags, and any number of extra fields; mark custom fields as secret.
 - Search across your saved entries, filter by category, and pin favorites.
+- Use keyboard shortcuts to search (Ctrl/Cmd+K), add an item (Ctrl/Cmd+N), or lock the vault (Ctrl/Cmd+L). Dialogs support Tab and Escape.
 - Generate random passwords, reveal or copy secrets, and automatically clear copied values after 30 seconds when clipboard permissions allow.
 - Lock the vault manually or after five minutes of inactivity.
+- Change the authenticator from the unlocked vault after scanning and confirming a new setup code.
 - Export and restore an encrypted JSON backup.
 - Unlock with a master password, a TOTP authenticator code, and a device key held in the operating system credential store.
 
@@ -18,7 +20,7 @@ Vault contents are encrypted in the app before they are written to the local app
 
 The TOTP code is an additional local sign-in check; it is not an independent encryption factor. The master password and OS-held device key protect a copied vault file. This offline app cannot remotely verify TOTP codes. OS credential stores may not require a biometric prompt on every access, so device-key protection depends on the security of your logged-in OS account.
 
-Encrypted backups are tied to the device key and can only be restored where that key is available. The master password, authenticator, and device key have no recovery service. Keep your authenticator setup key safe; losing factors can make the vault inaccessible. There is no account, cloud sync, or network service.
+Encrypted backups are tied to the device key and can only be restored where that key is available. The master password, authenticator, and device key have no recovery service. You can replace an authenticator only while the vault is unlocked; losing access after the vault is locked can make it inaccessible. Keep your authenticator setup key safe. There is no account, cloud sync, or network service.
 
 On Linux, an unlocked Secret Service provider such as GNOME Keyring or KWallet is required. The OS credential store may not prompt for biometrics; the app uses the platform's credential-store access rules.
 
